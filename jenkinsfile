@@ -1,0 +1,94 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('source code checkout') {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/harishpallapu/SourceCode_SAST.git']]])
+				sh 'git clone https://github.com/harishpallapu/sonarqube-scanner-scripts.git'
+            }
+        }
+        stage('SAST analysis') {
+            steps {
+				sh 'cp -r sonarqube-scanner-scripts/* .'
+				sh './sonar-scanner-4.6.2.2472-linux/bin/sonar-scanner'
+				sh 'ls -al'
+				sh 'cat .scannerwork/report-task.txt  | mail -s "Build-no-${BUILD_NUMBER}-sonar-reports-sucessfull" nihas0505@gmail.com'
+            }
+        }
+        stage('SCA') {
+            steps {
+	    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+				sh 'wget https://github.com/jeremylong/DependencyCheck/releases/download/v6.2.2/dependency-check-6.2.2-release.zip'
+				sh 'unzip -q dependency-check-6.2.2-release.zip'
+				sh './dependency-check/bin/dependency-check.sh --noupdate --project "TeachersFCU" --scan "Shoppingcart/lib/" --format HTML --out .'
+            }
+	    }
+        }
+	stage('build') {
+            steps {
+	    			sh 'mvn clean package'			
+            }
+	 }
+	stage('deploy to tomcat') {
+            steps {
+	    	sshagent(['deploy_user']) {
+    				sh 'scp -o StrictHostKeyChecking=no target/*.war ec2-user@52.66.208.66:/opt/tomcat/webapps'		
+		}		
+            }
+	}
+	stage('FunctionalAutomation_Web') {
+           steps {
+		   catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+	    			sh '''git clone https://github.com/harishpallapu/WebAutomationTesting.git
+					cd WebAutomationTesting
+					mvn test'''			
+            }
+			}
+	 }
+		stage('FunctionalAutomation_Mobile') {
+            steps {
+			catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+	    			sh ''' git clone https://github.com/harishpallapu/MobileAutomationTesting.git
+					cd MobileAutomationTesting
+					mvn test'''			
+            }
+			}
+	 }
+        stage('jmeter') {
+            steps {
+	    			sh 'pwd'
+				sh 'ls -al'
+				sh 'git clone https://github.com/harishpallapu/folder.git'
+				sh '''cd folder
+					chmod 777 -R *
+					./apache-jmeter-5.4.1/apache-jmeter-5.4.1/bin/jmeter -n -t OnlineShop_1.jmx -l OnlineShop_result_${BUILD_NUMBER}.jtl -e -o OnlineShop_${BUILD_NUMBER}.html 
+					zip -r jmeterreport-${BUILD_NUMBER}.zip OnlineShop_${BUILD_NUMBER}.html/*'''
+				
+            }
+        }
+	stage('upload reports to nexus') {
+            steps {
+				sh 'mkdir test-reports'
+				sh 'cp -r folder/jmeterreport-${BUILD_NUMBER}.zip test-reports'
+				sh '''cp .scannerwork/report-task.txt test-reports
+				    cd test-reports
+				    mv report-task.txt report-task-${BUILD_NUMBER}.txt
+				    curl --upload-file report-task-${BUILD_NUMBER}.txt -u admin:admin -v http://15.206.194.41:8081/repository/jenkins-reports/
+				    curl --upload-file jmeterreport-${BUILD_NUMBER}.zip -u admin:admin -v http://15.206.194.41:8081/repository/jenkins-reports/'''
+            }
+        }
+	}
+	post {
+        // Clean after build
+        always {
+		mail to: 'nihas0505@gmail.com',
+          	subject: "Status of pipeline: ${currentBuild.fullDisplayName}",
+         	body: "${env.BUILD_URL} has result ${currentBuild.result}"
+		jiraSendBuildInfo site: 'vamsisanagala.atlassian.net'
+		cleanWs(cleanWhenNotBuilt: false,
+                    deleteDirs: true,
+                    disableDeferredWipeout: true)
+        }
+    }
+}
